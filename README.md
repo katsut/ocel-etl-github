@@ -15,22 +15,17 @@ event are refreshed (incremental sync); `--full` forces a complete pull.
 Progress is emitted as [contract-v2 NDJSON](https://github.com/katsut/ocel-studio/blob/main/docs/connector-contract.md)
 on stdout, so the studio shows a live bar.
 
-## Status
-
-Scaffold + mapping design ([ADR 0001](docs/adr/0001-github-to-ocel-mapping.md)).
-Implementation in progress.
-
-## Mapping (ADR 0001)
+## Mapping
 
 - **Objects**: `issue`, `pull_request` (shared `owner/repo#N` id space),
   `user` (`@login`), `repository`
 - **Events**: open / comment / label / assign / review / close / merge /
   reopen / reference — every event links its subject, actor, and repository
-- **O2O**: `pull_request --closes--> issue`
+- Timeline kinds that are not modeled are counted and reported, never
+  silently dropped
 
-Unstructured knowledge sources (Slack, wikis) are deliberately out of scope
-for connectors: they attach later as LLM-assisted *enrichment* onto this
-structured backbone, with their own provenance labels — see the ADR.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full mapping and sync
+semantics.
 
 ## The ocel family
 
