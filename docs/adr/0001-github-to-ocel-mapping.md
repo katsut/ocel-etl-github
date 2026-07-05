@@ -51,7 +51,7 @@ One vocabulary for issues and PRs, distinguished by the object they touch:
 | `close issue` / `close pull request` | timeline `closed` |
 | `merge pull request` | timeline `merged` |
 | `reopen issue` / `reopen pull request` | timeline `reopened` |
-| `reference` | timeline `cross-referenced` (links the referencing PR/issue when it is in the pulled set) |
+| `reference` | timeline `cross-referenced` (links the referencing PR/issue only when its number is a *known subject*: the current listing plus, on incremental runs, subjects already in the log. Same-repo numbers can be absent — issues deleted, transferred, or converted to discussions keep their number in reference sources but never appear in the listing; found the hard way on sharkdp/fd, where linking them dangled hundreds of E2O relations) |
 
 Every event carries E2O links: the subject (`issue`/`pull_request`,
 qualifier `subject`), the actor (`user`, qualifier `actor`), and the

@@ -10,7 +10,7 @@
 //! `o/r#12|r456`) — `|` cannot appear in repository names, so incremental
 //! sync can prune by subject prefix.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use ocel::AttrValue;
@@ -25,6 +25,12 @@ const GHOST: &str = "@ghost";
 #[derive(Debug)]
 pub struct RepoMapper<'a> {
     repo: &'a str,
+    /// Issue/PR numbers that exist as objects (current listing, plus any
+    /// already in the log on incremental runs). Cross-references are linked
+    /// only against this set: numbers of issues that were deleted,
+    /// transferred, or converted to discussions still appear as reference
+    /// sources but never in the listing, and linking them would dangle.
+    known_subjects: BTreeSet<u64>,
     skipped: BTreeMap<String, usize>,
 }
 
@@ -34,9 +40,10 @@ fn user_id(actor: Option<&Actor>) -> String {
 
 impl<'a> RepoMapper<'a> {
     #[must_use]
-    pub fn new(repo: &'a str) -> Self {
+    pub fn new(repo: &'a str, known_subjects: BTreeSet<u64>) -> Self {
         Self {
             repo,
+            known_subjects,
             skipped: BTreeMap::new(),
         }
     }
@@ -220,8 +227,10 @@ impl<'a> RepoMapper<'a> {
         }
     }
 
-    /// Only same-repo references are linked: those subjects are certain to
-    /// be in the log (the pull covers the whole repository).
+    /// Only same-repo references to known subjects are linked. A same-repo
+    /// number can still be absent from the log: issues deleted, transferred,
+    /// or converted to discussions keep their number in reference sources
+    /// but never appear in the listing, and linking them would dangle.
     fn map_cross_reference(
         &mut self,
         staging: &mut StagingLog,
@@ -246,6 +255,13 @@ impl<'a> RepoMapper<'a> {
                 .or_insert(0) += 1;
             return;
         };
+        if !self.known_subjects.contains(&source.number) {
+            *self
+                .skipped
+                .entry("cross-referenced (missing subject)".to_owned())
+                .or_insert(0) += 1;
+            return;
+        }
         let source_id = self.subject_id(source.number);
         self.add_event(
             staging,
