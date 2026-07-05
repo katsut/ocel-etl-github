@@ -131,7 +131,19 @@ fn pull(
 
     // pass 2: timelines (and reviews for PRs), streamed per subject
     for (repo, issues) in &per_repo {
-        let mut mapper = RepoMapper::new(repo);
+        // cross-references may only link subjects that exist: the current
+        // listing, plus subjects already in the log on incremental runs
+        let mut known: BTreeSet<u64> = issues.iter().map(|i| i.number).collect();
+        if let Some(log) = &existing {
+            let prefix = format!("{repo}#");
+            known.extend(
+                log.objects
+                    .iter()
+                    .filter_map(|o| o.id.strip_prefix(&prefix))
+                    .filter_map(|n| n.parse::<u64>().ok()),
+            );
+        }
+        let mut mapper = RepoMapper::new(repo, known);
         mapper.register(&mut staging);
         let total = issues.len();
         for (index, issue) in issues.iter().enumerate() {

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, TimeZone, Utc};
 use ocel::AttrValue;
 use ocel_etl::StagingLog;
@@ -29,6 +31,10 @@ fn issue(number: u64, pr: bool) -> Issue {
     }
 }
 
+fn mapper<'a>(repo: &'a str, known: &[u64]) -> RepoMapper<'a> {
+    RepoMapper::new(repo, known.iter().copied().collect::<BTreeSet<u64>>())
+}
+
 fn entry(event: &str, minute: u32) -> TimelineEvent {
     TimelineEvent {
         event: event.into(),
@@ -45,8 +51,8 @@ fn entry(event: &str, minute: u32) -> TimelineEvent {
 #[test]
 fn issue_lifecycle_maps_to_events_and_state() {
     let mut staging = StagingLog::new();
-    let mut mapper = RepoMapper::new("o/r");
-    mapper.register(&mut staging);
+    let mut m = mapper("o/r", &[1, 2]);
+    m.register(&mut staging);
 
     let mut labeled = entry("labeled", 5);
     labeled.label = Some(Label { name: "bug".into() });
@@ -57,7 +63,7 @@ fn issue_lifecycle_maps_to_events_and_state() {
         entry("reopened", 20),
         entry("closed", 25),
     ];
-    mapper.map_issue(&mut staging, &issue(1, false), &timeline, &[]);
+    m.map_issue(&mut staging, &issue(1, false), &timeline, &[]);
 
     let log = staging.into_ocel().expect("valid log");
     let types: Vec<&str> = log.events.iter().map(|e| e.event_type.as_str()).collect();
@@ -104,8 +110,8 @@ fn issue_lifecycle_maps_to_events_and_state() {
 #[test]
 fn pull_request_gets_reviews_and_merge() {
     let mut staging = StagingLog::new();
-    let mut mapper = RepoMapper::new("o/r");
-    mapper.register(&mut staging);
+    let mut m = mapper("o/r", &[1, 2]);
+    m.register(&mut staging);
 
     let reviews = vec![Review {
         id: 900,
@@ -114,7 +120,7 @@ fn pull_request_gets_reviews_and_merge() {
         submitted_at: Some(ts(7)),
     }];
     let timeline = vec![entry("merged", 9)];
-    mapper.map_issue(&mut staging, &issue(2, true), &timeline, &reviews);
+    m.map_issue(&mut staging, &issue(2, true), &timeline, &reviews);
 
     let log = staging.into_ocel().expect("valid log");
     let types: Vec<&str> = log.events.iter().map(|e| e.event_type.as_str()).collect();
@@ -144,11 +150,11 @@ fn pull_request_gets_reviews_and_merge() {
 #[test]
 fn same_repo_cross_reference_links_and_foreign_is_counted() {
     let mut staging = StagingLog::new();
-    let mut mapper = RepoMapper::new("o/r");
-    mapper.register(&mut staging);
+    let mut m = mapper("o/r", &[1, 2]);
+    m.register(&mut staging);
 
     // the referencing PR must exist in the log
-    mapper.map_issue(&mut staging, &issue(2, true), &[], &[]);
+    m.map_issue(&mut staging, &issue(2, true), &[], &[]);
 
     let mut same_repo = entry("cross-referenced", 3);
     same_repo.source = Some(CrossRefSource {
@@ -168,10 +174,10 @@ fn same_repo_cross_reference_links_and_foreign_is_counted() {
             }),
         }),
     });
-    mapper.map_issue(&mut staging, &issue(1, false), &[same_repo, foreign], &[]);
+    m.map_issue(&mut staging, &issue(1, false), &[same_repo, foreign], &[]);
 
     assert_eq!(
-        mapper.skipped_kinds().get("cross-referenced (other repo)"),
+        m.skipped_kinds().get("cross-referenced (other repo)"),
         Some(&1)
     );
 
@@ -188,15 +194,42 @@ fn same_repo_cross_reference_links_and_foreign_is_counted() {
 }
 
 #[test]
+fn same_repo_reference_to_missing_subject_is_counted_not_linked() {
+    // #55 was deleted / converted to a discussion: same repo, but absent
+    // from the listing and therefore not a known subject
+    let mut staging = StagingLog::new();
+    let mut m = mapper("o/r", &[1, 2]);
+    m.register(&mut staging);
+
+    let mut ghost_ref = entry("cross-referenced", 3);
+    ghost_ref.source = Some(CrossRefSource {
+        issue: Some(CrossRefIssue {
+            number: 55,
+            repository: Some(RepoRef {
+                full_name: "o/r".into(),
+            }),
+        }),
+    });
+    m.map_issue(&mut staging, &issue(1, false), &[ghost_ref], &[]);
+
+    assert_eq!(
+        m.skipped_kinds().get("cross-referenced (missing subject)"),
+        Some(&1)
+    );
+    let log = staging.into_ocel().expect("valid log — nothing dangles");
+    assert!(log.events.iter().all(|e| e.event_type != "reference"));
+}
+
+#[test]
 fn unknown_timeline_kinds_are_counted_not_dropped_silently() {
     let mut staging = StagingLog::new();
-    let mut mapper = RepoMapper::new("o/r");
-    mapper.register(&mut staging);
-    mapper.map_issue(
+    let mut m = mapper("o/r", &[1, 2]);
+    m.register(&mut staging);
+    m.map_issue(
         &mut staging,
         &issue(1, false),
         &[entry("committed", 3), entry("committed", 4)],
         &[],
     );
-    assert_eq!(mapper.skipped_kinds().get("committed"), Some(&2));
+    assert_eq!(m.skipped_kinds().get("committed"), Some(&2));
 }
