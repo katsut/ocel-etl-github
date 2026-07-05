@@ -197,12 +197,25 @@ impl<H: HttpGet> GithubClient<H> {
         }
     }
 
-    /// GET with rate-limit backoff, parsing the JSON body. GitHub signals
-    /// rate limits as 429 or as 403 with reset headers.
+    /// GET with backoff, parsing the JSON body. GitHub signals rate limits as
+    /// 429 or as 403 with reset headers; transient transport failures (dropped
+    /// connections) are retried too, since a multi-thousand-request pull only
+    /// writes its output at the very end.
     fn get_json<T: DeserializeOwned>(&self, url: &str, context: &str) -> Result<T, ClientError> {
         let mut retries = 0;
         loop {
-            let response = self.http.get(url)?;
+            let response = match self.http.get(url) {
+                Ok(response) => response,
+                Err(err @ ClientError::Transport(_)) => {
+                    retries += 1;
+                    if retries > MAX_RETRIES {
+                        return Err(err);
+                    }
+                    sleep(Duration::from_secs(u64::from(retries)));
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             match response.status {
                 200 => {
                     return serde_json::from_str(&response.body).map_err(|e| ClientError::Parse {
