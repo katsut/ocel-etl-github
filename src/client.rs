@@ -20,6 +20,9 @@ const BASE_URL: &str = "https://api.github.com";
 const PAGE: usize = 100;
 /// Give up after this many consecutive rate-limit retries per request.
 const MAX_RETRIES: u32 = 5;
+/// Longest single backoff sleep. `X-RateLimit-Reset` can point up to an hour
+/// ahead; retrying sooner at worst burns one request.
+const MAX_BACKOFF_SECS: u64 = 120;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -200,7 +203,11 @@ impl<H: HttpGet> GithubClient<H> {
     /// GET with backoff, parsing the JSON body. GitHub signals rate limits as
     /// 429 or as 403 with reset headers; transient transport failures (dropped
     /// connections) are retried too, since a multi-thousand-request pull only
-    /// writes its output at the very end.
+    /// writes its output at the very end. Waits are capped at
+    /// [`MAX_BACKOFF_SECS`] — `X-RateLimit-Reset` can be up to an hour away,
+    /// and one uncapped sleep once stalled a pull for 80 minutes. Every
+    /// backoff is logged to stderr so a throttled pull is distinguishable
+    /// from a hung one.
     fn get_json<T: DeserializeOwned>(&self, url: &str, context: &str) -> Result<T, ClientError> {
         let mut retries = 0;
         loop {
@@ -211,7 +218,7 @@ impl<H: HttpGet> GithubClient<H> {
                     if retries > MAX_RETRIES {
                         return Err(err);
                     }
-                    sleep(Duration::from_secs(u64::from(retries)));
+                    backoff(context, retries, u64::from(retries), &err.to_string());
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -223,21 +230,21 @@ impl<H: HttpGet> GithubClient<H> {
                         message: e.to_string(),
                     });
                 }
-                429 => {
+                status @ 429 => {
                     retries += 1;
                     if retries > MAX_RETRIES {
                         return Err(ClientError::RateLimited(MAX_RETRIES));
                     }
-                    sleep(Duration::from_secs(response.retry_after.unwrap_or(1)));
+                    let wait = response.retry_after.unwrap_or(1).min(MAX_BACKOFF_SECS);
+                    backoff(context, retries, wait, &format!("status {status}"));
                 }
-                403 if response.retry_after.is_some() => {
+                status @ 403 if response.retry_after.is_some() => {
                     retries += 1;
                     if retries > MAX_RETRIES {
                         return Err(ClientError::RateLimited(MAX_RETRIES));
                     }
-                    sleep(Duration::from_secs(
-                        response.retry_after.unwrap_or(1).min(120),
-                    ));
+                    let wait = response.retry_after.unwrap_or(1).min(MAX_BACKOFF_SECS);
+                    backoff(context, retries, wait, &format!("status {status}"));
                 }
                 status => {
                     return Err(ClientError::Status {
@@ -248,4 +255,9 @@ impl<H: HttpGet> GithubClient<H> {
             }
         }
     }
+}
+
+fn backoff(context: &str, attempt: u32, wait_secs: u64, reason: &str) {
+    eprintln!("  {context}: {reason}; retry {attempt}/{MAX_RETRIES} in {wait_secs}s");
+    sleep(Duration::from_secs(wait_secs));
 }
