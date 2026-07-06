@@ -31,6 +31,10 @@ pub struct RepoMapper<'a> {
     /// transferred, or converted to discussions still appear as reference
     /// sources but never in the listing, and linking them would dangle.
     known_subjects: BTreeSet<u64>,
+    /// Store comment text as a `body` event attribute (default on: public
+    /// repositories are public data, and content predicates — e.g. dropping
+    /// gratitude-only comments — need the text).
+    comment_bodies: bool,
     skipped: BTreeMap<String, usize>,
 }
 
@@ -40,10 +44,11 @@ fn user_id(actor: Option<&Actor>) -> String {
 
 impl<'a> RepoMapper<'a> {
     #[must_use]
-    pub fn new(repo: &'a str, known_subjects: BTreeSet<u64>) -> Self {
+    pub fn new(repo: &'a str, known_subjects: BTreeSet<u64>, comment_bodies: bool) -> Self {
         Self {
             repo,
             known_subjects,
+            comment_bodies,
             skipped: BTreeMap::new(),
         }
     }
@@ -145,6 +150,12 @@ impl<'a> RepoMapper<'a> {
 
         match entry.event.as_str() {
             "commented" => {
+                let attributes = match (&entry.body, self.comment_bodies) {
+                    (Some(body), true) => {
+                        vec![("body".to_owned(), AttrValue::String(body.clone()))]
+                    }
+                    _ => vec![],
+                };
                 self.add_event(
                     staging,
                     event_id,
@@ -152,7 +163,7 @@ impl<'a> RepoMapper<'a> {
                     time,
                     sid,
                     entry.user.as_ref(),
-                    vec![],
+                    attributes,
                     vec![],
                 );
             }

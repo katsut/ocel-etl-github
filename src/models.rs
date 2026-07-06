@@ -70,6 +70,8 @@ pub struct TimelineEvent {
     pub label: Option<Label>,
     pub assignee: Option<Actor>,
     pub source: Option<CrossRefSource>,
+    /// `commented` entries carry the comment text.
+    pub body: Option<String>,
 }
 
 /// An entry of `GET /repos/{owner}/{repo}/pulls/{n}/reviews`.
