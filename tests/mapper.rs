@@ -32,7 +32,7 @@ fn issue(number: u64, pr: bool) -> Issue {
 }
 
 fn mapper<'a>(repo: &'a str, known: &[u64]) -> RepoMapper<'a> {
-    RepoMapper::new(repo, known.iter().copied().collect::<BTreeSet<u64>>())
+    RepoMapper::new(repo, known.iter().copied().collect::<BTreeSet<u64>>(), true)
 }
 
 fn entry(event: &str, minute: u32) -> TimelineEvent {
@@ -45,6 +45,7 @@ fn entry(event: &str, minute: u32) -> TimelineEvent {
         label: None,
         assignee: None,
         source: None,
+        body: None,
     }
 }
 
@@ -232,4 +233,37 @@ fn unknown_timeline_kinds_are_counted_not_dropped_silently() {
         &[],
     );
     assert_eq!(m.skipped_kinds().get("committed"), Some(&2));
+}
+
+#[test]
+fn comment_bodies_are_stored_when_enabled_and_omitted_when_not() {
+    let mut with_body = entry("commented", 3);
+    with_body.body = Some("thanks!".into());
+
+    let mut staging = StagingLog::new();
+    let mut on = mapper("o/r", &[1]);
+    on.register(&mut staging);
+    on.map_issue(&mut staging, &issue(1, false), &[with_body.clone()], &[]);
+    let log = staging.into_ocel().expect("valid log");
+    let comment = log
+        .events
+        .iter()
+        .find(|e| e.event_type == "comment")
+        .unwrap();
+    assert_eq!(
+        comment.attributes[0].value,
+        AttrValue::String("thanks!".into())
+    );
+
+    let mut staging = StagingLog::new();
+    let mut off = RepoMapper::new("o/r", [1].into_iter().collect::<BTreeSet<u64>>(), false);
+    off.register(&mut staging);
+    off.map_issue(&mut staging, &issue(1, false), &[with_body], &[]);
+    let log = staging.into_ocel().expect("valid log");
+    let comment = log
+        .events
+        .iter()
+        .find(|e| e.event_type == "comment")
+        .unwrap();
+    assert!(comment.attributes.is_empty());
 }

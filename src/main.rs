@@ -42,6 +42,9 @@ enum Command {
         /// Ignore any existing --out file and pull everything.
         #[arg(long)]
         full: bool,
+        /// Do not store comment text as a `body` event attribute.
+        #[arg(long)]
+        no_comment_bodies: bool,
     },
 }
 
@@ -85,6 +88,7 @@ fn pull(
     out: &Path,
     since_arg: Option<&str>,
     full: bool,
+    comment_bodies: bool,
 ) -> Result<(), Box<dyn Error>> {
     for repo in repos {
         let valid = repo.split('/').count() == 2 && !repo.contains('|');
@@ -143,7 +147,7 @@ fn pull(
                     .filter_map(|n| n.parse::<u64>().ok()),
             );
         }
-        let mut mapper = RepoMapper::new(repo, known);
+        let mut mapper = RepoMapper::new(repo, known, comment_bodies);
         mapper.register(&mut staging);
         let total = issues.len();
         for (index, issue) in issues.iter().enumerate() {
@@ -189,7 +193,8 @@ fn main() -> ExitCode {
             out,
             since,
             full,
-        } => match pull(&repos, &out, since.as_deref(), full) {
+            no_comment_bodies,
+        } => match pull(&repos, &out, since.as_deref(), full, !no_comment_bodies) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("error: {err}");
