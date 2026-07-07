@@ -6,9 +6,9 @@ use std::process::ExitCode;
 use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 use ocel_etl::StagingLog;
-use ocel_etl_github::client::GithubClient;
+use ocel_etl_github::client::{ClientError, GithubClient};
 use ocel_etl_github::mapper::RepoMapper;
-use ocel_etl_github::sync::prune_refreshed;
+use ocel_etl_github::sync::{prune_refreshed, repair_closes_links};
 
 /// GitHub → OCEL 2.0 extraction.
 #[derive(Debug, Parser)]
@@ -160,6 +160,16 @@ fn pull(
             mapper.map_issue(&mut staging, issue, &timeline, &reviews);
             emit_progress(repo, index + 1, Some(total));
         }
+        // pass 3: closing commits → O2O `closes` on the closing PRs
+        mapper.resolve_closes(&mut staging, |sha| match client.commit_pulls(repo, sha) {
+            Ok(pulls) => Ok(pulls.into_iter().map(|p| p.number).collect()),
+            // the commit can be gone (force-pushed away): unresolvable —
+            // counted as `closed (unlinked commit)` — but not fatal
+            Err(ClientError::Status {
+                status: 404 | 422, ..
+            }) => Ok(Vec::new()),
+            Err(err) => Err(err),
+        })?;
         if !mapper.skipped_kinds().is_empty() {
             let summary: Vec<String> = mapper
                 .skipped_kinds()
@@ -168,6 +178,13 @@ fn pull(
                 .collect();
             eprintln!("  skipped timeline kinds: {}", summary.join(", "));
         }
+    }
+
+    // `closes` links live on PR objects but are learned from issue
+    // timelines: a refreshed PR is rebuilt without them, so unrefreshed
+    // issues contribute theirs from the existing log.
+    if let Some(log) = &existing {
+        repair_closes_links(&mut staging, log, &refreshed);
     }
 
     let log = staging

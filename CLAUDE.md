@@ -27,10 +27,13 @@ exceed foreground timeouts.
 - `src/mapper.rs` — objects: issue/pull_request (`owner/repo#N`), user
   (`@login`, deleted authors → `@ghost`), repository; events from timeline +
   reviews (open/comment/label/assign/review/close/merge/reopen/reference);
-  every event carries subject + actor + repo relations; unknown timeline
-  kinds are counted, never dropped silently
+  every event carries subject + actor + repo relations; O2O `closes` on the
+  PR that closed an issue (closing commit → `/commits/{sha}/pulls`, cached
+  by sha, resolved after all subjects are mapped); unknown timeline kinds
+  are counted, never dropped silently
 - `src/sync.rs` — incremental via event-id prefix (`<subject>|<kind>` — `|`
-  cannot appear in repo names)
+  cannot appear in repo names); `repair_closes_links` restores `closes`
+  O2O on refreshed PRs from unrefreshed issues' records
 - `src/main.rs` — CLI (`pull`, `--no-comment-bodies`, `--since`/`--full`),
   NDJSON progress
 
@@ -40,6 +43,14 @@ exceed foreground timeouts.
   is in the pulled set — issues moved/deleted/converted to discussions
   otherwise produce dangling E2O and fail the gate (bitten once; now
   counted as `cross-referenced (missing subject)`).
+- REST close attribution is a two-part rule: `closed.commit_id`, else the
+  commit of a `referenced` entry with a timestamp **identical** to the
+  `closed` entry's (keyword closes from merged PRs write that pair
+  atomically; validated against GraphQL `ClosedEvent.closer`). A commit
+  that resolves to no pulled PR is counted as `closed (unlinked commit)`.
+  Unattributed closes (manual, or PR closes REST simply doesn't record —
+  they exist) get no link and no counter. Do not assume `connected` events
+  help (they carry no source reference in REST).
 - Comment bodies default **on** (public data; `--no-comment-bodies` to
   drop) — the Backlog connector is the opposite.
 - Issue/PR `state` is a dynamic attribute (open/closed/merged).

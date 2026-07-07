@@ -60,6 +60,19 @@ fn pagination_stops_on_short_page() {
 }
 
 #[test]
+fn commit_pulls_hits_the_commit_endpoint_and_parses() {
+    let fake = FakeHttp::new(vec![ok(r#"[{"number":292},{"number":300}]"#)]);
+    let client = GithubClient::new(&fake, "http://fake");
+
+    let pulls = client.commit_pulls("o/r", "f01685c").expect("parsed");
+    let numbers: Vec<u64> = pulls.iter().map(|p| p.number).collect();
+    assert_eq!(numbers, vec![292, 300]);
+    let urls = fake.urls.borrow();
+    assert_eq!(urls.len(), 1, "one short page suffices");
+    assert!(urls[0].contains("/repos/o/r/commits/f01685c/pulls?"));
+}
+
+#[test]
 fn rate_limit_is_retried_then_succeeds() {
     let limited = Ok(HttpResponse {
         status: 429,

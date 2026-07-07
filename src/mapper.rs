@@ -3,14 +3,16 @@
 //! Objects: `issue` / `pull_request` (shared `owner/repo#N` id space),
 //! `user` (`@login`), `repository` (`owner/repo`). Events come from the
 //! issue timeline plus PR reviews; every event links its subject
-//! (`subject`), actor (`actor`), and repository (`repo`). Timeline kinds we
-//! do not model are counted, not silently dropped.
+//! (`subject`), actor (`actor`), and repository (`repo`). A pull request
+//! whose merge closed an issue additionally carries a structural O2O
+//! relationship `closes` to that issue. Timeline kinds we do not model are
+//! counted, not silently dropped.
 //!
 //! Event ids are `<subject>|<kind>` (e.g. `o/r#12|open`, `o/r#12|t123`,
 //! `o/r#12|r456`) — `|` cannot appear in repository names, so incremental
 //! sync can prune by subject prefix.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Utc};
 use ocel::AttrValue;
@@ -35,6 +37,10 @@ pub struct RepoMapper<'a> {
     /// repositories are public data, and content predicates — e.g. dropping
     /// gratitude-only comments — need the text).
     comment_bodies: bool,
+    /// (closing commit sha, closed issue number) collected while mapping;
+    /// resolved into O2O `closes` links by [`RepoMapper::resolve_closes`]
+    /// once every subject is mapped.
+    pending_closes: Vec<(String, u64)>,
     skipped: BTreeMap<String, usize>,
 }
 
@@ -49,6 +55,7 @@ impl<'a> RepoMapper<'a> {
             repo,
             known_subjects,
             comment_bodies,
+            pending_closes: Vec::new(),
             skipped: BTreeMap::new(),
         }
     }
@@ -110,6 +117,15 @@ impl<'a> RepoMapper<'a> {
 
         for (index, entry) in timeline.iter().enumerate() {
             self.map_timeline_entry(staging, &sid, noun, index, entry);
+        }
+
+        // Which pull request the closing commit belongs to is resolved in
+        // [`RepoMapper::resolve_closes`] after every subject is mapped. A
+        // merged PR's own `closed` entry carries its merge commit —
+        // resolving it would only find the PR itself — so only issues are
+        // collected.
+        if !is_pr {
+            self.collect_pending_closes(timeline, issue.number);
         }
 
         for review in reviews {
@@ -236,6 +252,82 @@ impl<'a> RepoMapper<'a> {
                 *self.skipped.entry(other.to_owned()).or_insert(0) += 1;
             }
         }
+    }
+
+    /// Collect the closing-commit shas of an issue's `closed` events.
+    ///
+    /// The commit is on the `closed` entry itself when GitHub attributed
+    /// the close to it directly (commit-message keyword). A keyword close
+    /// from a merged PR usually leaves `closed.commit_id` null and instead
+    /// writes a separate `referenced` entry for the closing commit in the
+    /// same atomic operation — with an identical timestamp. Validated
+    /// against the GraphQL ground truth (`ClosedEvent.closer`) on real
+    /// data: the same-instant rule attributes only actual closers, while
+    /// references written at any other moment stay unlinked (a stray
+    /// reference 20 s before a manual close must not become a `closes`).
+    /// Some PR closes produce neither record and are attributable only via
+    /// GraphQL; REST extraction leaves them unlinked, indistinguishable
+    /// from manual closes.
+    fn collect_pending_closes(&mut self, timeline: &[TimelineEvent], number: u64) {
+        for closed in timeline.iter().filter(|e| e.event == "closed") {
+            if let Some(sha) = &closed.commit_id {
+                self.pending_closes.push((sha.clone(), number));
+                continue;
+            }
+            let Some(time) = closed.created_at else {
+                continue;
+            };
+            self.pending_closes.extend(
+                timeline
+                    .iter()
+                    .filter(|e| e.event == "referenced" && e.created_at == Some(time))
+                    .filter_map(|e| e.commit_id.clone())
+                    .map(|sha| (sha, number)),
+            );
+        }
+    }
+
+    /// Resolve the closed-by-commit pairs collected by
+    /// [`RepoMapper::map_issue`] into O2O `closes` links on the closing pull
+    /// requests. Call once, after every subject is mapped.
+    ///
+    /// The REST timeline never names the closing PR directly (`connected` /
+    /// `disconnected` entries carry no source reference), so `resolve` maps
+    /// a commit sha to the numbers of its associated pull requests
+    /// (`GET /commits/{sha}/pulls`); it is called once per distinct sha —
+    /// one merge commit can close several issues. Every resolved PR in the
+    /// pulled set gets the link; a close whose commit resolves to no known
+    /// PR (no associated PRs, or PRs outside the pulled set) is counted as
+    /// `closed (unlinked commit)`, never guessed.
+    pub fn resolve_closes<E>(
+        &mut self,
+        staging: &mut StagingLog,
+        mut resolve: impl FnMut(&str) -> Result<Vec<u64>, E>,
+    ) -> Result<(), E> {
+        let mut cache: HashMap<String, Vec<u64>> = HashMap::new();
+        for (sha, number) in std::mem::take(&mut self.pending_closes) {
+            if !cache.contains_key(&sha) {
+                let pulls = resolve(&sha)?;
+                cache.insert(sha.clone(), pulls);
+            }
+            let known: Vec<u64> = cache[&sha]
+                .iter()
+                .copied()
+                .filter(|pull| self.known_subjects.contains(pull))
+                .collect();
+            if known.is_empty() {
+                *self
+                    .skipped
+                    .entry("closed (unlinked commit)".to_owned())
+                    .or_insert(0) += 1;
+                continue;
+            }
+            let issue_id = self.subject_id(number);
+            for pull in known {
+                staging.add_o2o(&self.subject_id(pull), &issue_id, "closes");
+            }
+        }
+        Ok(())
     }
 
     /// Only same-repo references to known subjects are linked. A same-repo
