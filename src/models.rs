@@ -72,6 +72,18 @@ pub struct TimelineEvent {
     pub source: Option<CrossRefSource>,
     /// `commented` entries carry the comment text.
     pub body: Option<String>,
+    /// `closed` entries carry the closing commit SHA when GitHub attributed
+    /// the close to a commit (closing keyword in a commit message); null on
+    /// manual closes and on closes via a PR-body keyword.
+    pub commit_id: Option<String>,
+}
+
+/// An entry of `GET /repos/{owner}/{repo}/commits/{sha}/pulls` — the pull
+/// requests associated with a commit. Only the number is needed: it is
+/// looked up among the pulled subjects, which are the source of truth.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PullRef {
+    pub number: u64,
 }
 
 /// An entry of `GET /repos/{owner}/{repo}/pulls/{n}/reviews`.

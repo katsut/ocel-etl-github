@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::convert::Infallible;
 
 use chrono::{DateTime, TimeZone, Utc};
 use ocel::AttrValue;
@@ -46,7 +47,19 @@ fn entry(event: &str, minute: u32) -> TimelineEvent {
         assignee: None,
         source: None,
         body: None,
+        commit_id: None,
     }
+}
+
+fn closed_by(sha: &str, minute: u32) -> TimelineEvent {
+    let mut closed = entry("closed", minute);
+    closed.commit_id = Some(sha.into());
+    closed
+}
+
+/// For tests where no close awaits resolution: fails the test if called.
+fn no_resolution(_sha: &str) -> Result<Vec<u64>, Infallible> {
+    panic!("resolve must not be called")
 }
 
 #[test]
@@ -266,4 +279,164 @@ fn comment_bodies_are_stored_when_enabled_and_omitted_when_not() {
         .find(|e| e.event_type == "comment")
         .unwrap();
     assert!(comment.attributes.is_empty());
+}
+
+#[test]
+fn issues_closed_by_a_pr_commit_get_closes_o2o_on_the_pr() {
+    let mut staging = StagingLog::new();
+    let mut m = mapper("o/r", &[1, 2, 3]);
+    m.register(&mut staging);
+    m.map_issue(&mut staging, &issue(3, true), &[entry("merged", 9)], &[]);
+    // one squash-merge commit closed both issues
+    m.map_issue(
+        &mut staging,
+        &issue(1, false),
+        &[closed_by("abc123", 10)],
+        &[],
+    );
+    m.map_issue(
+        &mut staging,
+        &issue(2, false),
+        &[closed_by("abc123", 11)],
+        &[],
+    );
+
+    let mut lookups = 0;
+    m.resolve_closes(&mut staging, |sha| {
+        lookups += 1;
+        assert_eq!(sha, "abc123");
+        Ok::<_, Infallible>(vec![3])
+    })
+    .unwrap();
+    assert_eq!(lookups, 1, "distinct shas are resolved once");
+    assert!(m.skipped_kinds().is_empty(), "{:?}", m.skipped_kinds());
+
+    let log = staging.into_ocel().expect("valid log");
+    // the link sits on the pull_request object, pointing at the issues
+    let pr = log.objects.iter().find(|o| o.id == "o/r#3").unwrap();
+    assert!(pr
+        .relationships
+        .iter()
+        .any(|r| r.object_id == "o/r#1" && r.qualifier == "closes"));
+    assert!(pr
+        .relationships
+        .iter()
+        .any(|r| r.object_id == "o/r#2" && r.qualifier == "closes"));
+    let subject = log.objects.iter().find(|o| o.id == "o/r#1").unwrap();
+    assert!(subject.relationships.is_empty());
+}
+
+#[test]
+fn close_attributed_via_same_instant_referenced_commit_is_linked() {
+    // a keyword close from a merged PR leaves `closed.commit_id` null and
+    // writes a `referenced` entry for the closing commit at the same instant
+    let mut staging = StagingLog::new();
+    let mut m = mapper("o/r", &[1, 2]);
+    m.register(&mut staging);
+    m.map_issue(&mut staging, &issue(2, true), &[entry("merged", 9)], &[]);
+
+    let mut referenced = entry("referenced", 10);
+    referenced.commit_id = Some("abc123".into());
+    m.map_issue(
+        &mut staging,
+        &issue(1, false),
+        &[referenced, entry("closed", 10)],
+        &[],
+    );
+
+    let mut lookups = 0;
+    m.resolve_closes(&mut staging, |sha| {
+        lookups += 1;
+        assert_eq!(sha, "abc123");
+        Ok::<_, Infallible>(vec![2])
+    })
+    .unwrap();
+    assert_eq!(lookups, 1);
+    assert_eq!(m.skipped_kinds().get("closed (unlinked commit)"), None);
+
+    let log = staging.into_ocel().expect("valid log");
+    let pr = log.objects.iter().find(|o| o.id == "o/r#2").unwrap();
+    assert!(pr
+        .relationships
+        .iter()
+        .any(|r| r.object_id == "o/r#1" && r.qualifier == "closes"));
+}
+
+#[test]
+fn reference_at_another_moment_does_not_attribute_a_close() {
+    // a commit referenced the issue 2 minutes before someone closed it by
+    // hand: not the closer, no link, no counter
+    let mut staging = StagingLog::new();
+    let mut m = mapper("o/r", &[1, 2]);
+    m.register(&mut staging);
+
+    let mut referenced = entry("referenced", 8);
+    referenced.commit_id = Some("abc123".into());
+    m.map_issue(
+        &mut staging,
+        &issue(1, false),
+        &[referenced, entry("closed", 10)],
+        &[],
+    );
+
+    m.resolve_closes(&mut staging, no_resolution).unwrap();
+    assert_eq!(m.skipped_kinds().get("closed (unlinked commit)"), None);
+
+    let log = staging.into_ocel().expect("valid log");
+    assert!(log.objects.iter().all(|o| o.relationships.is_empty()));
+}
+
+#[test]
+fn manual_close_needs_no_resolution_and_no_counter() {
+    // closed by hand: no commit_id on the event — that is normal
+    let mut staging = StagingLog::new();
+    let mut m = mapper("o/r", &[1]);
+    m.register(&mut staging);
+    m.map_issue(&mut staging, &issue(1, false), &[entry("closed", 10)], &[]);
+
+    m.resolve_closes(&mut staging, no_resolution).unwrap();
+    assert!(m.skipped_kinds().is_empty(), "{:?}", m.skipped_kinds());
+
+    let log = staging.into_ocel().expect("valid log");
+    assert!(log.objects.iter().all(|o| o.relationships.is_empty()));
+}
+
+#[test]
+fn unresolvable_closing_commit_is_counted_not_guessed() {
+    let mut staging = StagingLog::new();
+    let mut m = mapper("o/r", &[1, 2]);
+    m.register(&mut staging);
+    m.map_issue(&mut staging, &issue(1, false), &[closed_by("aaa", 10)], &[]);
+    m.map_issue(&mut staging, &issue(2, false), &[closed_by("bbb", 12)], &[]);
+
+    m.resolve_closes(&mut staging, |sha| {
+        Ok::<_, Infallible>(match sha {
+            "aaa" => vec![], // no associated pull request at all
+            _ => vec![99],   // a PR outside the pulled set
+        })
+    })
+    .unwrap();
+    assert_eq!(m.skipped_kinds().get("closed (unlinked commit)"), Some(&2));
+
+    let log = staging.into_ocel().expect("valid log — nothing dangles");
+    assert!(log.objects.iter().all(|o| o.relationships.is_empty()));
+}
+
+#[test]
+fn a_merged_prs_own_close_commit_is_not_resolved() {
+    // a merged PR's timeline carries `closed` with the merge commit sha;
+    // resolving it would only ever find the PR itself
+    let mut staging = StagingLog::new();
+    let mut m = mapper("o/r", &[2]);
+    m.register(&mut staging);
+    m.map_issue(
+        &mut staging,
+        &issue(2, true),
+        &[entry("merged", 9), closed_by("abc123", 10)],
+        &[],
+    );
+
+    m.resolve_closes(&mut staging, no_resolution).unwrap();
+    assert!(m.skipped_kinds().is_empty(), "{:?}", m.skipped_kinds());
+    staging.into_ocel().expect("valid log");
 }

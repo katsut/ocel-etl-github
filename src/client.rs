@@ -13,7 +13,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::models::{Issue, Review, TimelineEvent};
+use crate::models::{Issue, PullRef, Review, TimelineEvent};
 
 const BASE_URL: &str = "https://api.github.com";
 /// Page size for list endpoints (the GitHub API maximum).
@@ -172,6 +172,17 @@ impl<H: HttpGet> GithubClient<H> {
         self.paginated(
             &format!("/repos/{repo}/pulls/{number}/reviews"),
             "reviews",
+            |_| {},
+        )
+    }
+
+    /// The pull requests associated with a commit — resolves which PR's
+    /// merge closed an issue, since a `closed` timeline event only ever
+    /// carries a commit sha, never the PR itself.
+    pub fn commit_pulls(&self, repo: &str, sha: &str) -> Result<Vec<PullRef>, ClientError> {
+        self.paginated(
+            &format!("/repos/{repo}/commits/{sha}/pulls"),
+            "commit pulls",
             |_| {},
         )
     }

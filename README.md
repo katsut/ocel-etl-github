@@ -21,6 +21,10 @@ on stdout, so the studio shows a live bar.
   `user` (`@login`), `repository`
 - **Events**: open / comment / label / assign / review / close / merge /
   reopen / reference — every event links its subject, actor, and repository
+- **Relationships**: a pull request whose merge closed an issue carries an
+  O2O link `closes` to that issue (when the close is attributable via the
+  REST API; closing commits that resolve to no pulled PR are counted,
+  never guessed)
 - Timeline kinds that are not modeled are counted and reported, never
   silently dropped
 
